@@ -1,0 +1,6 @@
+{
+  "name": "PPL Trening",
+  "description": "Plan treningowy Push / Pull / Legs ze stoperem interwałowym, rejestracją ciężarów i wykresem progresji.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
