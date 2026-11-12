@@ -20,8 +20,10 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.ActiveWorkoutMiniBar
+import com.example.ui.components.ExerciseDetailDialog
 import com.example.ui.screens.ActiveWorkoutScreen
 import com.example.ui.screens.AnalyticsScreen
+import com.example.ui.screens.CalendarScreen
 import com.example.ui.screens.EditPlanScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.SummaryScreen
@@ -58,6 +60,15 @@ fun WorkoutApp(viewModel: WorkoutViewModel = viewModel()) {
     val chartPoints by viewModel.chartPoints.collectAsStateWithLifecycle()
     val exportImportMessage by viewModel.exportImportMessage.collectAsStateWithLifecycle()
 
+    val latestSession by viewModel.latestSession.collectAsStateWithLifecycle()
+    val allSetLogs by viewModel.allSetLogs.collectAsStateWithLifecycle()
+    val detailExerciseName by viewModel.detailExerciseName.collectAsStateWithLifecycle()
+    val detailMetric by viewModel.detailMetric.collectAsStateWithLifecycle()
+    val detailExerciseLogs by viewModel.detailExerciseLogs.collectAsStateWithLifecycle()
+    val detailExerciseChartPoints by viewModel.detailExerciseChartPoints.collectAsStateWithLifecycle()
+    val calendarSelectedDate by viewModel.calendarSelectedDate.collectAsStateWithLifecycle()
+    val calendarMonth by viewModel.calendarMonth.collectAsStateWithLifecycle()
+
     Box(modifier = Modifier.fillMaxSize()) {
         AnimatedContent(
             targetState = currentScreen,
@@ -70,12 +81,15 @@ fun WorkoutApp(viewModel: WorkoutViewModel = viewModel()) {
                     HomeScreen(
                         selectedDay = selectedDay,
                         exercises = exercises,
+                        latestSession = latestSession,
                         isWorkoutActive = activeWorkoutState.isActive,
                         onResumeWorkout = { viewModel.navigateTo(AppScreen.ACTIVE_WORKOUT) },
                         onSelectDay = { viewModel.selectDay(it) },
                         onStartWorkout = { viewModel.startWorkout() },
                         onOpenEditPlan = { viewModel.navigateTo(AppScreen.EDIT_PLAN) },
-                        onOpenAnalytics = { viewModel.navigateTo(AppScreen.ANALYTICS) }
+                        onOpenAnalytics = { viewModel.navigateTo(AppScreen.ANALYTICS) },
+                        onOpenCalendar = { viewModel.navigateTo(AppScreen.CALENDAR) },
+                        onOpenExerciseDetail = { viewModel.openExerciseDetails(it) }
                     )
                 }
 
@@ -100,74 +114,109 @@ fun WorkoutApp(viewModel: WorkoutViewModel = viewModel()) {
                     )
                 }
 
-            AppScreen.SUMMARY -> {
-                SummaryScreen(
-                    session = summarySession,
-                    setLogs = summarySetLogs,
-                    chartPoints = chartPoints,
-                    analyticsMode = analyticsMode,
-                    onSetAnalyticsMode = { viewModel.setAnalyticsMode(it) },
-                    onBackToHome = { viewModel.navigateTo(AppScreen.HOME) },
-                    onOpenFullAnalytics = { viewModel.navigateTo(AppScreen.ANALYTICS) }
-                )
-            }
+                AppScreen.SUMMARY -> {
+                    SummaryScreen(
+                        session = summarySession,
+                        setLogs = summarySetLogs,
+                        chartPoints = chartPoints,
+                        analyticsMode = analyticsMode,
+                        onSetAnalyticsMode = { viewModel.setAnalyticsMode(it) },
+                        onBackToHome = { viewModel.navigateTo(AppScreen.HOME) },
+                        onOpenFullAnalytics = { viewModel.navigateTo(AppScreen.ANALYTICS) }
+                    )
+                }
 
-            AppScreen.EDIT_PLAN -> {
-                EditPlanScreen(
-                    selectedDay = selectedDay,
-                    exercises = exercises,
-                    onSelectDay = { viewModel.selectDay(it) },
-                    onAddExercise = { day, name, sets, minReps, maxReps, muscle ->
-                        viewModel.addExerciseToPlan(day, name, sets, minReps, maxReps, muscle)
-                    },
-                    onUpdateExercise = { viewModel.updateExerciseInPlan(it) },
-                    onDeleteExercise = { viewModel.deleteExerciseFromPlan(it) },
-                    onMoveExercise = { ex, up -> viewModel.moveExercise(ex, up) },
-                    onResetToDefaults = { viewModel.resetPlanToDefaults() },
-                    onBack = { viewModel.navigateTo(AppScreen.HOME) }
-                )
-            }
+                AppScreen.EDIT_PLAN -> {
+                    EditPlanScreen(
+                        selectedDay = selectedDay,
+                        exercises = exercises,
+                        onSelectDay = { viewModel.selectDay(it) },
+                        onAddExercise = { day, name, sets, minReps, maxReps, muscle ->
+                            viewModel.addExerciseToPlan(day, name, sets, minReps, maxReps, muscle)
+                        },
+                        onUpdateExercise = { viewModel.updateExerciseInPlan(it) },
+                        onDeleteExercise = { viewModel.deleteExerciseFromPlan(it) },
+                        onMoveExercise = { ex, up -> viewModel.moveExercise(ex, up) },
+                        onResetToDefaults = { viewModel.resetPlanToDefaults() },
+                        onBack = { viewModel.navigateTo(AppScreen.HOME) }
+                    )
+                }
 
-            AppScreen.ANALYTICS -> {
-                val context = LocalContext.current
-                AnalyticsScreen(
-                    sessions = allSessions,
-                    distinctExercises = allLoggedExercises,
-                    selectedExercise = selectedAnalyticsExercise,
-                    analyticsMode = analyticsMode,
-                    chartPoints = chartPoints,
-                    exportImportMessage = exportImportMessage,
-                    onDismissMessage = { viewModel.dismissExportImportMessage() },
-                    onSelectMode = { viewModel.setAnalyticsMode(it) },
-                    onSelectExercise = { viewModel.setAnalyticsExercise(it) },
-                    onExportCsvToUri = { uri -> viewModel.exportCsvToUri(uri) { /* complete */ } },
-                    onShareCsv = {
-                        viewModel.shareCsv(context) { shareUri ->
-                            if (shareUri != null) {
-                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/csv"
-                                    putExtra(Intent.EXTRA_STREAM, shareUri)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                AppScreen.ANALYTICS -> {
+                    val context = LocalContext.current
+                    AnalyticsScreen(
+                        sessions = allSessions,
+                        distinctExercises = allLoggedExercises,
+                        selectedExercise = selectedAnalyticsExercise,
+                        analyticsMode = analyticsMode,
+                        chartPoints = chartPoints,
+                        exportImportMessage = exportImportMessage,
+                        onDismissMessage = { viewModel.dismissExportImportMessage() },
+                        onSelectMode = { viewModel.setAnalyticsMode(it) },
+                        onSelectExercise = { viewModel.setAnalyticsExercise(it) },
+                        onOpenExerciseDetail = { viewModel.openExerciseDetails(it) },
+                        onDeleteSession = { viewModel.deleteWorkoutSession(it) },
+                        onOpenCalendar = { viewModel.navigateTo(AppScreen.CALENDAR) },
+                        onExportCsvToUri = { uri -> viewModel.exportCsvToUri(uri) { /* complete */ } },
+                        onShareCsv = {
+                            viewModel.shareCsv(context) { shareUri ->
+                                if (shareUri != null) {
+                                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/csv"
+                                        putExtra(Intent.EXTRA_STREAM, shareUri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(Intent.createChooser(sendIntent, "Udostępnij kopię treningów CSV"))
                                 }
-                                context.startActivity(Intent.createChooser(sendIntent, "Udostępnij kopię treningów CSV"))
                             }
-                        }
-                    },
-                    onImportCsvFromUri = { uri -> viewModel.importCsvFromUri(uri) },
-                    onBack = { viewModel.navigateTo(AppScreen.HOME) }
-                )
+                        },
+                        onImportCsvFromUri = { uri -> viewModel.importCsvFromUri(uri) },
+                        onBack = { viewModel.navigateTo(AppScreen.HOME) }
+                    )
+                }
+
+                AppScreen.CALENDAR -> {
+                    CalendarScreen(
+                        sessions = allSessions,
+                        allSetLogs = allSetLogs,
+                        latestSession = latestSession,
+                        selectedDate = calendarSelectedDate,
+                        displayedMonth = calendarMonth,
+                        onSelectDate = { viewModel.selectCalendarDate(it) },
+                        onNextMonth = { viewModel.nextCalendarMonth() },
+                        onPreviousMonth = { viewModel.previousCalendarMonth() },
+                        onResetToToday = { viewModel.resetCalendarToToday() },
+                        onDeleteSession = { viewModel.deleteWorkoutSession(it) },
+                        onBack = { viewModel.navigateTo(AppScreen.HOME) }
+                    )
+                }
             }
         }
-    }
 
-    if (currentScreen != AppScreen.ACTIVE_WORKOUT && activeWorkoutState.isActive) {
-        ActiveWorkoutMiniBar(
-            state = activeWorkoutState,
-            onExpand = { viewModel.navigateTo(AppScreen.ACTIVE_WORKOUT) },
-            onTogglePlayPause = { viewModel.togglePlayPause() },
-            onSkipInterval = { viewModel.skipInterval() },
-            modifier = Modifier.align(Alignment.BottomCenter)
-        )
+        if (currentScreen != AppScreen.ACTIVE_WORKOUT && activeWorkoutState.isActive) {
+            ActiveWorkoutMiniBar(
+                state = activeWorkoutState,
+                onExpand = { viewModel.navigateTo(AppScreen.ACTIVE_WORKOUT) },
+                onTogglePlayPause = { viewModel.togglePlayPause() },
+                onSkipInterval = { viewModel.skipInterval() },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+
+        // Exercise Progression & Detail Dialog
+        detailExerciseName?.let { exName ->
+            val matchingPlanEx = exercises.find { it.name.equals(exName, ignoreCase = true) }
+            ExerciseDetailDialog(
+                exerciseName = exName,
+                muscleGroup = matchingPlanEx?.muscleGroup.orEmpty(),
+                targetSets = matchingPlanEx?.targetSets ?: 3,
+                repsRange = matchingPlanEx?.repsRangeLabel.orEmpty(),
+                selectedMetric = detailMetric,
+                chartPoints = detailExerciseChartPoints,
+                logs = detailExerciseLogs,
+                onSelectMetric = { viewModel.setDetailMetric(it) },
+                onDismiss = { viewModel.closeExerciseDetails() }
+            )
+        }
     }
-}
 }

@@ -72,6 +72,15 @@ class WorkoutRepository(private val dao: WorkoutDao) {
         sessionId
     }
 
+    suspend fun deleteWorkoutSession(sessionId: Long) = withContext(Dispatchers.IO) {
+        dao.deleteSetLogsForSession(sessionId)
+        dao.deleteSessionById(sessionId)
+    }
+
+    suspend fun getSetLogsForSession(sessionId: Long): List<SetLogEntity> = withContext(Dispatchers.IO) {
+        dao.getSetLogsForSession(sessionId)
+    }
+
     suspend fun getSessionDetails(sessionId: Long): Pair<WorkoutSessionEntity?, List<SetLogEntity>> = withContext(Dispatchers.IO) {
         val session = dao.getSessionById(sessionId)
         val logs = dao.getSetLogsForSession(sessionId)

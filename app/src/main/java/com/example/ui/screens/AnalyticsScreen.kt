@@ -71,6 +71,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.example.ui.theme.getDayTypeColor
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AnalyticsScreen(
@@ -83,6 +91,9 @@ fun AnalyticsScreen(
     onDismissMessage: () -> Unit,
     onSelectMode: (AnalyticsMode) -> Unit,
     onSelectExercise: (String?) -> Unit,
+    onOpenExerciseDetail: (String) -> Unit,
+    onDeleteSession: (Long) -> Unit,
+    onOpenCalendar: () -> Unit,
     onExportCsvToUri: (Uri) -> Unit,
     onShareCsv: () -> Unit,
     onImportCsvFromUri: (Uri) -> Unit,
@@ -91,6 +102,38 @@ fun AnalyticsScreen(
 ) {
     BackHandler {
         onBack()
+    }
+
+    var sessionToDelete by remember { mutableStateOf<WorkoutSessionEntity?>(null) }
+
+    if (sessionToDelete != null) {
+        val s = sessionToDelete!!
+        val dateText = SimpleDateFormat("dd MMMM yyyy", Locale.getDefault()).format(Date(s.dateMillis))
+        AlertDialog(
+            onDismissRequest = { sessionToDelete = null },
+            title = { Text("Usunąć ten trening?") },
+            text = {
+                Text(
+                    "Czy na pewno chcesz usunąć sesję treningową ${s.dayType} z dnia $dateText? Zostaną usunięte wszystkie zapisane w niej serie i tonaż. Tej operacji nie można cofnąć."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val id = s.id
+                        sessionToDelete = null
+                        onDeleteSession(id)
+                    }
+                ) {
+                    Text("Usuń trening", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { sessionToDelete = null }) {
+                    Text("Anuluj")
+                }
+            }
+        )
     }
 
     val exportLauncher = rememberLauncherForActivityResult(
@@ -154,6 +197,16 @@ fun AnalyticsScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = onOpenCalendar,
+                        modifier = Modifier.testTag("action_open_calendar")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CalendarMonth,
+                            contentDescription = "Kalendarz treningów",
+                            tint = CyanAccent
+                        )
+                    }
                     IconButton(
                         onClick = {
                             val timestamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault()).format(Date())
@@ -387,6 +440,28 @@ fun AnalyticsScreen(
                                 )
                             }
                         }
+
+                        val currentEx = selectedExercise ?: distinctExercises.firstOrNull()
+                        if (currentEx != null) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            TextButton(
+                                onClick = { onOpenExerciseDetail(currentEx) },
+                                modifier = Modifier.testTag("btn_inspect_exercise_progression")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.TrendingUp,
+                                    contentDescription = null,
+                                    tint = CyanAccent,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Zobacz historię powtórzeń i ciężaru dla „$currentEx” ↗",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = CyanAccent
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -433,7 +508,10 @@ fun AnalyticsScreen(
                 }
             } else {
                 items(sessions) { session ->
-                    SessionHistoryCard(session = session)
+                    SessionHistoryCard(
+                        session = session,
+                        onDelete = { sessionToDelete = session }
+                    )
                 }
             }
 
@@ -477,9 +555,13 @@ fun StatMetricCard(
 }
 
 @Composable
-fun SessionHistoryCard(session: WorkoutSessionEntity) {
+fun SessionHistoryCard(
+    session: WorkoutSessionEntity,
+    onDelete: () -> Unit
+) {
     val dateFormat = SimpleDateFormat("dd MMMM yyyy, HH:mm", Locale.getDefault())
     val durationMin = session.durationSeconds / 60
+    val sessionColor = getDayTypeColor(session.dayType)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -494,16 +576,16 @@ fun SessionHistoryCard(session: WorkoutSessionEntity) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(
                         shape = RoundedCornerShape(6.dp),
-                        color = CyanAccent.copy(alpha = 0.15f)
+                        color = sessionColor.copy(alpha = 0.18f)
                     ) {
                         Text(
                             text = session.dayType,
                             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                            color = CyanAccent,
+                            color = sessionColor,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                         )
                     }
@@ -524,17 +606,33 @@ fun SessionHistoryCard(session: WorkoutSessionEntity) {
                 )
             }
 
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    text = "${String.format(Locale.getDefault(), "%.0f", session.totalTonnageKg)} kg",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                    color = LimeAccent
-                )
-                Text(
-                    text = "${session.completedSetsCount} serii",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = "${String.format(Locale.getDefault(), "%.0f", session.totalTonnageKg)} kg",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = LimeAccent
+                    )
+                    Text(
+                        text = "${session.completedSetsCount} serii",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.testTag("delete_session_history_${session.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Usuń trening",
+                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.75f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }

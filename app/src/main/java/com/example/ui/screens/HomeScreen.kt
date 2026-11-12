@@ -56,17 +56,35 @@ import com.example.data.model.PlanExerciseEntity
 import com.example.ui.theme.CyanAccent
 import com.example.ui.theme.LimeAccent
 
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.TrendingUp
+import com.example.data.model.WorkoutSessionEntity
+import com.example.ui.theme.PushColor
+import com.example.ui.theme.PullColor
+import com.example.ui.theme.LegsColor
+import com.example.ui.theme.getDayTypeColor
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.temporal.ChronoUnit
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     selectedDay: DayType,
     exercises: List<PlanExerciseEntity>,
+    latestSession: WorkoutSessionEntity? = null,
     isWorkoutActive: Boolean = false,
     onResumeWorkout: () -> Unit = {},
     onSelectDay: (DayType) -> Unit,
     onStartWorkout: () -> Unit,
     onOpenEditPlan: () -> Unit,
     onOpenAnalytics: () -> Unit,
+    onOpenCalendar: () -> Unit,
+    onOpenExerciseDetail: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val totalSets = exercises.sumOf { it.targetSets }
@@ -91,13 +109,23 @@ fun HomeScreen(
                 },
                 actions = {
                     IconButton(
+                        onClick = onOpenCalendar,
+                        modifier = Modifier.testTag("nav_calendar_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CalendarMonth,
+                            contentDescription = "Kalendarz treningów",
+                            tint = CyanAccent
+                        )
+                    }
+                    IconButton(
                         onClick = onOpenAnalytics,
                         modifier = Modifier.testTag("nav_analytics_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.QueryStats,
                             contentDescription = "Statystyki i Progresja",
-                            tint = CyanAccent
+                            tint = LimeAccent
                         )
                     }
                     IconButton(
@@ -198,6 +226,14 @@ fun HomeScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // "Kiedy ostatnio byłem na treningu" Quick Info Bar
+            item {
+                LastWorkoutQuickBar(
+                    latestSession = latestSession,
+                    onClick = onOpenCalendar
+                )
+            }
+
             // Day selection tabs
             item {
                 Column {
@@ -224,11 +260,12 @@ fun HomeScreen(
                                         Text(
                                             text = day.recommendedDayName,
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = if (isSelected) CyanAccent else MaterialTheme.colorScheme.onSurfaceVariant
+                                            color = if (isSelected) day.color else MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                         Text(
                                             text = day.code,
-                                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = if (isSelected) day.color else MaterialTheme.colorScheme.onSurface
                                         )
                                     }
                                 },
@@ -237,13 +274,13 @@ fun HomeScreen(
                                         Box(
                                             modifier = Modifier
                                                 .size(8.dp)
-                                                .background(LimeAccent, CircleShape)
+                                                .background(day.color, CircleShape)
                                         )
                                     }
                                 } else null,
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = CyanAccent.copy(alpha = 0.15f),
-                                    selectedLabelColor = MaterialTheme.colorScheme.onSurface
+                                    selectedContainerColor = day.color.copy(alpha = 0.16f),
+                                    selectedLabelColor = day.color
                                 ),
                                 modifier = Modifier
                                     .weight(1f)
@@ -269,7 +306,7 @@ fun HomeScreen(
                             .background(
                                 Brush.horizontalGradient(
                                     colors = listOf(
-                                        CyanAccent.copy(alpha = 0.12f),
+                                        selectedDay.color.copy(alpha = 0.15f),
                                         Color.Transparent
                                     )
                                 )
@@ -335,9 +372,9 @@ fun HomeScreen(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Serie robocze",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = "Kliknij, by sprawdzić progres",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CyanAccent
                     )
                 }
             }
@@ -346,12 +383,100 @@ fun HomeScreen(
             itemsIndexed(exercises, key = { _, item -> item.id }) { index, exercise ->
                 ExercisePlanCard(
                     index = index + 1,
-                    exercise = exercise
+                    exercise = exercise,
+                    onClick = { onOpenExerciseDetail(exercise.name) }
                 )
             }
 
             item {
                 Spacer(modifier = Modifier.height(if (isWorkoutActive) 76.dp else 16.dp))
+            }
+        }
+    }
+}
+
+@Composable
+fun LastWorkoutQuickBar(
+    latestSession: WorkoutSessionEntity?,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .testTag("quick_bar_last_workout"),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+        tonalElevation = 1.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.CalendarMonth,
+                    contentDescription = null,
+                    tint = CyanAccent,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = "Ostatni trening:",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (latestSession != null) {
+                        val sessionDate = Instant.ofEpochMilli(latestSession.dateMillis)
+                            .atZone(ZoneId.systemDefault())
+                            .toLocalDate()
+                        val daysAgo = ChronoUnit.DAYS.between(sessionDate, LocalDate.now())
+                        val relText = when (daysAgo) {
+                            0L -> "Dzisiaj"
+                            1L -> "Wczoraj"
+                            else -> "$daysAgo dni temu"
+                        }
+                        Text(
+                            text = relText,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    } else {
+                        Text(
+                            text = "Brak zarejestrowanych sesji",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (latestSession != null) {
+                    val sessionColor = getDayTypeColor(latestSession.dayType)
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = sessionColor.copy(alpha = 0.18f)
+                    ) {
+                        Text(
+                            text = latestSession.dayType,
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = sessionColor,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = "Otwórz kalendarz",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
             }
         }
     }
@@ -376,10 +501,13 @@ fun MetricPill(label: String, value: String) {
 fun ExercisePlanCard(
     index: Int,
     exercise: PlanExerciseEntity,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 2.dp
@@ -413,11 +541,19 @@ fun ExercisePlanCard(
                     style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                Text(
-                    text = exercise.muscleGroup,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = exercise.muscleGroup,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "• Sprawdź progres",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = CyanAccent
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(8.dp))
@@ -427,12 +563,23 @@ fun ExercisePlanCard(
                 shape = RoundedCornerShape(8.dp),
                 color = CyanAccent.copy(alpha = 0.12f)
             ) {
-                Text(
-                    text = "${exercise.targetSets} × ${exercise.repsRangeLabel}",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                    color = CyanAccent,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "${exercise.targetSets} × ${exercise.repsRangeLabel}",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        color = CyanAccent
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Default.TrendingUp,
+                        contentDescription = "Progresja",
+                        tint = CyanAccent,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
     }

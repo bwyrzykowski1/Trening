@@ -92,4 +92,14 @@ interface WorkoutDao {
 
     @Query("SELECT COUNT(*) FROM workout_sessions WHERE dateMillis = :dateMillis AND dayType = :dayType")
     suspend fun countSessionsWithDateAndDay(dateMillis: Long, dayType: String): Int
+
+    // Session and Set Log Deletion
+    @Query("DELETE FROM workout_sessions WHERE id = :sessionId")
+    suspend fun deleteSessionById(sessionId: Long)
+
+    @Query("DELETE FROM set_logs WHERE sessionId = :sessionId")
+    suspend fun deleteSetLogsForSession(sessionId: Long)
+
+    @Delete
+    suspend fun deleteSession(session: WorkoutSessionEntity)
 }

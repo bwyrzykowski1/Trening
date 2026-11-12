@@ -134,4 +134,26 @@ class ExampleUnitTest {
         assertTrue(stateLast.isLastSetOfWorkout)
         org.junit.Assert.assertNull(stateLast.nextExercise)
     }
+
+    @Test
+    fun testDayTypeColorsAndMetrics() {
+        val pushColor = com.example.ui.theme.getDayTypeColor("PUSH")
+        val pullColor = com.example.ui.theme.getDayTypeColor("PULL")
+        val legsColor = com.example.ui.theme.getDayTypeColor("LEGS")
+
+        // Colors must be distinct for each workout type
+        org.junit.Assert.assertNotEquals(pushColor, pullColor)
+        org.junit.Assert.assertNotEquals(pushColor, legsColor)
+        org.junit.Assert.assertNotEquals(pullColor, legsColor)
+
+        // Exercise metrics
+        val metrics = com.example.ui.viewmodel.ExerciseMetric.entries
+        assertEquals(3, metrics.size)
+        assertTrue(metrics.any { it.name == "WEIGHT" })
+        assertTrue(metrics.any { it.name == "REPS" })
+        assertTrue(metrics.any { it.name == "ESTIMATED_1RM" })
+
+        // Calendar screen destination
+        assertTrue(com.example.ui.viewmodel.AppScreen.entries.contains(com.example.ui.viewmodel.AppScreen.CALENDAR))
+    }
 }

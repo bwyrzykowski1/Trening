@@ -24,10 +24,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import java.time.LocalDate
+import java.time.YearMonth
 import java.util.Date
 import java.util.Locale
 
@@ -36,12 +39,19 @@ enum class AppScreen {
     ACTIVE_WORKOUT,
     SUMMARY,
     EDIT_PLAN,
-    ANALYTICS
+    ANALYTICS,
+    CALENDAR
 }
 
 enum class AnalyticsMode(val label: String) {
     TONNAGE("Tonaż sesji (kg)"),
     MAX_WEIGHT("Ciężar maksymalny (kg)"),
+    ESTIMATED_1RM("Szacowane 1RM (kg)")
+}
+
+enum class ExerciseMetric(val label: String) {
+    WEIGHT("Ciężar (kg)"),
+    REPS("Powtórzenia (reps)"),
     ESTIMATED_1RM("Szacowane 1RM (kg)")
 }
 
@@ -192,6 +202,121 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
             }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // All set logs flow
+    val allSetLogs: StateFlow<List<SetLogEntity>> = repository.getAllSetLogs()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Latest session for "when was the last workout" banner
+    val latestSession: StateFlow<WorkoutSessionEntity?> = allSessions
+        .map { sessions -> sessions.maxByOrNull { it.dateMillis } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    // Calendar state
+    private val _calendarSelectedDate = MutableStateFlow(LocalDate.now())
+    val calendarSelectedDate: StateFlow<LocalDate> = _calendarSelectedDate.asStateFlow()
+
+    private val _calendarMonth = MutableStateFlow(YearMonth.now())
+    val calendarMonth: StateFlow<YearMonth> = _calendarMonth.asStateFlow()
+
+    fun selectCalendarDate(date: LocalDate) {
+        _calendarSelectedDate.value = date
+    }
+
+    fun nextCalendarMonth() {
+        _calendarMonth.update { it.plusMonths(1) }
+    }
+
+    fun previousCalendarMonth() {
+        _calendarMonth.update { it.minusMonths(1) }
+    }
+
+    fun resetCalendarToToday() {
+        _calendarMonth.value = YearMonth.now()
+        _calendarSelectedDate.value = LocalDate.now()
+    }
+
+    // Exercise details & progression modal state
+    private val _detailExerciseName = MutableStateFlow<String?>(null)
+    val detailExerciseName: StateFlow<String?> = _detailExerciseName.asStateFlow()
+
+    private val _detailMetric = MutableStateFlow(ExerciseMetric.WEIGHT)
+    val detailMetric: StateFlow<ExerciseMetric> = _detailMetric.asStateFlow()
+
+    fun openExerciseDetails(exerciseName: String) {
+        _detailExerciseName.value = exerciseName
+    }
+
+    fun closeExerciseDetails() {
+        _detailExerciseName.value = null
+    }
+
+    fun setDetailMetric(metric: ExerciseMetric) {
+        _detailMetric.value = metric
+    }
+
+    // Detail logs for selected exercise
+    val detailExerciseLogs: StateFlow<List<SetLogEntity>> = combine(
+        _detailExerciseName,
+        allSetLogs
+    ) { name, logs ->
+        if (name.isNullOrBlank()) emptyList()
+        else logs.filter { it.exerciseName.equals(name, ignoreCase = true) }.sortedByDescending { it.timestamp }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Progression chart points for selected exercise (toggling WEIGHT vs REPS vs 1RM)
+    val detailExerciseChartPoints: StateFlow<List<ChartDataPoint>> = combine(
+        _detailExerciseName,
+        _detailMetric,
+        allSetLogs
+    ) { name, metric, logs ->
+        if (name.isNullOrBlank()) emptyList()
+        else {
+            val exLogs = logs.filter { it.exerciseName.equals(name, ignoreCase = true) }
+            val grouped = exLogs.groupBy { it.sessionId }
+            val dateFormat = SimpleDateFormat("dd.MM", Locale.getDefault())
+            grouped.mapNotNull { (_, sessionLogs) ->
+                if (sessionLogs.isEmpty()) null
+                else {
+                    val firstLog = sessionLogs.first()
+                    when (metric) {
+                        ExerciseMetric.WEIGHT -> {
+                            val maxW = sessionLogs.maxOf { it.weightKg }
+                            ChartDataPoint(
+                                timestamp = firstLog.timestamp,
+                                value = maxW,
+                                label = "${dateFormat.format(Date(firstLog.timestamp))}: ${maxW} kg"
+                            )
+                        }
+                        ExerciseMetric.REPS -> {
+                            val maxR = sessionLogs.maxOf { it.reps }.toDouble()
+                            ChartDataPoint(
+                                timestamp = firstLog.timestamp,
+                                value = maxR,
+                                label = "${dateFormat.format(Date(firstLog.timestamp))}: ${maxR.toInt()} powt."
+                            )
+                        }
+                        ExerciseMetric.ESTIMATED_1RM -> {
+                            val best1RM = sessionLogs.maxOf { it.estimated1RM }
+                            ChartDataPoint(
+                                timestamp = firstLog.timestamp,
+                                value = best1RM,
+                                label = "${dateFormat.format(Date(firstLog.timestamp))}: ${String.format(Locale.getDefault(), "%.1f", best1RM)} kg"
+                            )
+                        }
+                    }
+                }
+            }.sortedBy { it.timestamp }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Delete workout session
+    fun deleteWorkoutSession(sessionId: Long) {
+        viewModelScope.launch {
+            repository.deleteWorkoutSession(sessionId)
+            _exportImportMessage.value = "Sesja treningowa została usunięta z historii."
+        }
+    }
 
     // Navigation methods
     fun navigateTo(screen: AppScreen) {
