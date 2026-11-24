@@ -12,10 +12,14 @@ import com.example.data.model.DayType
 import com.example.data.model.PlanExerciseEntity
 import com.example.data.model.SetLogEntity
 import com.example.data.model.WorkoutSessionEntity
+import com.example.service.WorkoutTimerService
 import com.example.ui.components.ChartDataPoint
 import com.example.ui.components.IntervalPhase
+import com.example.ui.util.ElapsedClock
 import com.example.ui.util.HapticUtil
 import com.example.ui.util.SoundCueUtil
+import com.example.ui.util.SystemElapsedClock
+import com.example.ui.util.WorkoutTimerMath
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,6 +37,7 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 enum class AppScreen {
     HOME,
@@ -62,15 +67,19 @@ data class ActiveWorkoutState(
     val currentExerciseIndex: Int = 0,
     val currentSetNumber: Int = 1,
     val intervalPhase: IntervalPhase = IntervalPhase.EXERCISE,
-    val timerSecondsRemaining: Int = 120,
-    val timerTotalSeconds: Int = 120,
+    val timerSecondsRemaining: Int = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+    val timerTotalSeconds: Int = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
     val isTimerRunning: Boolean = false,
+    val intervalEndElapsedMs: Long = 0L,
+    val pausedRemainingMs: Long = WorkoutTimerMath.DEFAULT_INTERVAL_MS,
     val startTimestamp: Long = 0L,
     val recordedLogs: List<SetLogEntity> = emptyList(),
     val suggestedLastSet: SetLogEntity? = null,
     val inputWeight: String = "",
     val inputReps: String = "",
-    val isSoundEnabled: Boolean = true
+    val isSoundEnabled: Boolean = true,
+    val soundVolume: Float = 1.0f,
+    val isLoudModeEnabled: Boolean = false
 ) {
     val currentExercise: PlanExerciseEntity?
         get() = exercises.getOrNull(currentExerciseIndex)
@@ -91,12 +100,26 @@ data class ActiveWorkoutState(
 
     val nextExercise: PlanExerciseEntity?
         get() = exercises.getOrNull(currentExerciseIndex + 1)
+
+    val previousExercise: PlanExerciseEntity?
+        get() = exercises.getOrNull(currentExerciseIndex - 1)
+
+    val canGoToPreviousExercise: Boolean
+        get() = currentExerciseIndex > 0
+
+    val canGoToPreviousStep: Boolean
+        get() = WorkoutSessionHelper.resolvePreviousStep(this) != null
+
+    val currentSetRecordedLog: SetLogEntity?
+        get() = WorkoutSessionHelper.findRecordedLog(recordedLogs, currentExercise?.name, currentSetNumber)
 }
 
 class WorkoutViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: WorkoutRepository
+    private val clock: ElapsedClock = SystemElapsedClock
     private var timerJob: Job? = null
+    private var lastCountdownBeepSecond: Int? = null
 
     // Screen navigation state
     private val _currentScreen = MutableStateFlow(AppScreen.HOME)
@@ -106,8 +129,10 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
     private val _selectedDay = MutableStateFlow(DayType.getSuggestedForToday())
     val selectedDay: StateFlow<DayType> = _selectedDay.asStateFlow()
 
-    // Active Workout state
-    private val _activeWorkout = MutableStateFlow(ActiveWorkoutState())
+    private val soundPrefs = application.getSharedPreferences(PREFS_SOUND, Context.MODE_PRIVATE)
+
+    // Active Workout state (initialized with persisted sound preferences)
+    private val _activeWorkout = MutableStateFlow(createIdleWorkoutState())
     val activeWorkout: StateFlow<ActiveWorkoutState> = _activeWorkout.asStateFlow()
 
     // Last completed session for summary
@@ -333,6 +358,13 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
         if (exercises.isEmpty()) return
 
         val firstExercise = exercises.first()
+        val nowElapsed = clock.elapsedRealtime()
+        lastCountdownBeepSecond = null
+
+        val soundEnabled = soundPrefs.getBoolean(KEY_SOUND_ENABLED, true)
+        val savedVolume = SoundCueUtil.normalizeVolume(soundPrefs.getFloat(KEY_SOUND_VOLUME, 1.0f))
+        val loudMode = soundPrefs.getBoolean(KEY_LOUD_MODE, false)
+
         _activeWorkout.value = ActiveWorkoutState(
             isActive = true,
             dayType = _selectedDay.value,
@@ -340,17 +372,23 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
             currentExerciseIndex = 0,
             currentSetNumber = 1,
             intervalPhase = IntervalPhase.EXERCISE,
-            timerSecondsRemaining = 120,
-            timerTotalSeconds = 120,
+            timerSecondsRemaining = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+            timerTotalSeconds = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
             isTimerRunning = true,
+            intervalEndElapsedMs = nowElapsed + WorkoutTimerMath.DEFAULT_INTERVAL_MS,
+            pausedRemainingMs = WorkoutTimerMath.DEFAULT_INTERVAL_MS,
             startTimestamp = System.currentTimeMillis(),
             recordedLogs = emptyList(),
             inputWeight = "",
-            inputReps = ""
+            inputReps = "",
+            isSoundEnabled = soundEnabled,
+            soundVolume = savedVolume,
+            isLoudModeEnabled = loudMode
         )
 
         loadSuggestionForExercise(firstExercise.name)
         startTimerLoop()
+        syncTimerNotification()
         _currentScreen.value = AppScreen.ACTIVE_WORKOUT
     }
 
@@ -358,10 +396,13 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val lastSet = repository.getLatestSetForExercise(exerciseName)
             _activeWorkout.update { state ->
+                if (!state.currentExercise?.name.equals(exerciseName, ignoreCase = true)) {
+                    return@update state
+                }
                 state.copy(
                     suggestedLastSet = lastSet,
                     inputWeight = if (state.inputWeight.isEmpty() && lastSet != null) {
-                        String.format(Locale.US, "%.1f", lastSet.weightKg).removeSuffix(".0")
+                        WorkoutSessionHelper.formatWeight(lastSet.weightKg)
                     } else state.inputWeight,
                     inputReps = if (state.inputReps.isEmpty() && lastSet != null) {
                         lastSet.reps.toString()
@@ -375,7 +416,7 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
         val suggestion = _activeWorkout.value.suggestedLastSet ?: return
         _activeWorkout.update {
             it.copy(
-                inputWeight = String.format(Locale.US, "%.1f", suggestion.weightKg).removeSuffix(".0"),
+                inputWeight = WorkoutSessionHelper.formatWeight(suggestion.weightKg),
                 inputReps = suggestion.reps.toString()
             )
         }
@@ -390,10 +431,10 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun adjustWeight(delta: Double) {
-        val current = _activeWorkout.value.inputWeight.toDoubleOrNull() ?: 0.0
+        val current = _activeWorkout.value.inputWeight.replace(',', '.').toDoubleOrNull() ?: 0.0
         val next = (current + delta).coerceAtLeast(0.0)
         _activeWorkout.update {
-            it.copy(inputWeight = String.format(Locale.US, "%.1f", next).removeSuffix(".0"))
+            it.copy(inputWeight = WorkoutSessionHelper.formatWeight(next))
         }
     }
 
@@ -414,21 +455,82 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun pauseTimer() {
-        _activeWorkout.update { it.copy(isTimerRunning = false) }
+        val current = _activeWorkout.value
+        if (!current.isActive || !current.isTimerRunning) return
+
+        val remainingMs = if (current.intervalEndElapsedMs > 0L) {
+            (current.intervalEndElapsedMs - clock.elapsedRealtime()).coerceAtLeast(0L)
+        } else {
+            current.timerSecondsRemaining * 1000L
+        }
+
         timerJob?.cancel()
+        _activeWorkout.update {
+            it.copy(
+                isTimerRunning = false,
+                intervalEndElapsedMs = 0L,
+                pausedRemainingMs = remainingMs,
+                timerSecondsRemaining = WorkoutTimerMath.millisToDisplaySeconds(remainingMs)
+            )
+        }
+        syncTimerNotification()
     }
 
     fun resumeTimer() {
-        _activeWorkout.update { it.copy(isTimerRunning = true) }
+        val current = _activeWorkout.value
+        if (!current.isActive || current.isTimerRunning) return
+
+        val nowElapsed = clock.elapsedRealtime()
+        val remainingMs = current.pausedRemainingMs.coerceAtLeast(0L)
+        lastCountdownBeepSecond = null
+
+        _activeWorkout.update {
+            it.copy(
+                isTimerRunning = true,
+                intervalEndElapsedMs = nowElapsed + remainingMs,
+                timerSecondsRemaining = WorkoutTimerMath.millisToDisplaySeconds(remainingMs)
+            )
+        }
         startTimerLoop()
+        syncTimerNotification()
     }
 
     fun add30Seconds() {
+        val current = _activeWorkout.value
+        if (!current.isActive) return
+
+        val addedMs = 30_000L
+        val nowElapsed = clock.elapsedRealtime()
+        lastCountdownBeepSecond = null
+
         _activeWorkout.update {
-            val newRemaining = it.timerSecondsRemaining + 30
-            val newTotal = it.timerTotalSeconds.coerceAtLeast(newRemaining)
-            it.copy(timerSecondsRemaining = newRemaining, timerTotalSeconds = newTotal)
+            if (it.isTimerRunning) {
+                val baseRemaining = if (it.intervalEndElapsedMs > 0L) {
+                    (it.intervalEndElapsedMs - nowElapsed).coerceAtLeast(0L)
+                } else {
+                    it.timerSecondsRemaining * 1000L
+                }
+                val newRemainingMs = baseRemaining + addedMs
+                val newRemainingSec = WorkoutTimerMath.millisToDisplaySeconds(newRemainingMs)
+                val newTotal = it.timerTotalSeconds.coerceAtLeast(newRemainingSec)
+                it.copy(
+                    intervalEndElapsedMs = nowElapsed + newRemainingMs,
+                    pausedRemainingMs = newRemainingMs,
+                    timerSecondsRemaining = newRemainingSec,
+                    timerTotalSeconds = newTotal
+                )
+            } else {
+                val newRemainingMs = it.pausedRemainingMs + addedMs
+                val newRemainingSec = WorkoutTimerMath.millisToDisplaySeconds(newRemainingMs)
+                val newTotal = it.timerTotalSeconds.coerceAtLeast(newRemainingSec)
+                it.copy(
+                    pausedRemainingMs = newRemainingMs,
+                    timerSecondsRemaining = newRemainingSec,
+                    timerTotalSeconds = newTotal
+                )
+            }
         }
+        syncTimerNotification()
     }
 
     fun skipInterval() {
@@ -436,70 +538,224 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun toggleSound() {
-        _activeWorkout.update { it.copy(isSoundEnabled = !it.isSoundEnabled) }
+        var nextEnabled = true
+        var nextVolume = 1.0f
+        var loudMode = false
+        _activeWorkout.update { state ->
+            nextEnabled = !state.isSoundEnabled
+            nextVolume = if (nextEnabled && state.soundVolume <= 0.01f) 0.8f else state.soundVolume
+            loudMode = state.isLoudModeEnabled
+            state.copy(
+                isSoundEnabled = nextEnabled,
+                soundVolume = nextVolume
+            )
+        }
+        saveSoundPrefs(nextEnabled, nextVolume, loudMode)
+        if (nextEnabled) {
+            SoundCueUtil.applySystemStreamVolume(getApplication(), nextVolume, loudMode)
+        }
+    }
+
+    fun setSoundVolume(volume: Float, playPreview: Boolean = false) {
+        val clamped = SoundCueUtil.normalizeVolume(volume)
+        val enabled = clamped > 0.001f
+        var loudMode = false
+        _activeWorkout.update { state ->
+            loudMode = state.isLoudModeEnabled
+            state.copy(
+                soundVolume = clamped,
+                isSoundEnabled = enabled
+            )
+        }
+        saveSoundPrefs(enabled, clamped, loudMode)
+        SoundCueUtil.applySystemStreamVolume(getApplication(), clamped, loudMode)
+        if (playPreview && enabled) {
+            SoundCueUtil.playVolumePreviewCue(clamped, loudMode)
+        }
+    }
+
+    fun adjustSoundVolume(delta: Float) {
+        val current = _activeWorkout.value
+        val baseVolume = if (current.isSoundEnabled) current.soundVolume else 0f
+        val stepped = (((baseVolume + delta) * 10f).roundToInt() / 10f).coerceIn(0f, 1f)
+        setSoundVolume(stepped, playPreview = true)
+    }
+
+    fun toggleLoudMode() {
+        var nextLoud = false
+        var volume = 1.0f
+        var enabled = true
+        _activeWorkout.update { state ->
+            nextLoud = !state.isLoudModeEnabled
+            volume = state.soundVolume
+            enabled = state.isSoundEnabled
+            state.copy(isLoudModeEnabled = nextLoud)
+        }
+        saveSoundPrefs(enabled, volume, nextLoud)
+        if (enabled && volume > 0f) {
+            SoundCueUtil.applySystemStreamVolume(getApplication(), volume, nextLoud)
+            SoundCueUtil.playVolumePreviewCue(volume, nextLoud)
+        }
+    }
+
+    fun testSoundCue() {
+        val current = _activeWorkout.value
+        val effectiveVolume = if (current.soundVolume > 0.001f) current.soundVolume else 0.8f
+        if (!current.isSoundEnabled || current.soundVolume <= 0.001f) {
+            setSoundVolume(effectiveVolume, playPreview = true)
+        } else {
+            SoundCueUtil.applySystemStreamVolume(getApplication(), effectiveVolume, current.isLoudModeEnabled)
+            SoundCueUtil.playVolumePreviewCue(effectiveVolume, current.isLoudModeEnabled)
+        }
+    }
+
+    private fun createIdleWorkoutState(): ActiveWorkoutState {
+        return ActiveWorkoutState(
+            isSoundEnabled = soundPrefs.getBoolean(KEY_SOUND_ENABLED, true),
+            soundVolume = SoundCueUtil.normalizeVolume(soundPrefs.getFloat(KEY_SOUND_VOLUME, 1.0f)),
+            isLoudModeEnabled = soundPrefs.getBoolean(KEY_LOUD_MODE, false)
+        )
+    }
+
+    private fun saveSoundPrefs(enabled: Boolean, volume: Float, loudMode: Boolean) {
+        soundPrefs.edit()
+            .putBoolean(KEY_SOUND_ENABLED, enabled)
+            .putFloat(KEY_SOUND_VOLUME, SoundCueUtil.normalizeVolume(volume))
+            .putBoolean(KEY_LOUD_MODE, loudMode)
+            .apply()
+    }
+
+    /**
+     * Immediately reconciles the displayed countdown against real monotonic elapsed time
+     * (SystemClock.elapsedRealtime). Called continuously by the timer loop AND whenever
+     * MainActivity resumes from background or lock screen.
+     */
+    fun syncTimerWithClock() {
+        val current = _activeWorkout.value
+        if (!current.isActive || !current.isTimerRunning || current.intervalEndElapsedMs <= 0L) {
+            return
+        }
+
+        val nowElapsed = clock.elapsedRealtime()
+        val tick = WorkoutTimerMath.evaluateTick(current.intervalEndElapsedMs, nowElapsed)
+
+        if (!tick.isExpired) {
+            if (tick.remainingSeconds != current.timerSecondsRemaining) {
+                if (current.isSoundEnabled && tick.remainingSeconds in 1..3 && lastCountdownBeepSecond != tick.remainingSeconds) {
+                    lastCountdownBeepSecond = tick.remainingSeconds
+                    SoundCueUtil.playCountdownTick(current.soundVolume, current.isLoudModeEnabled)
+                }
+                _activeWorkout.update {
+                    it.copy(
+                        timerSecondsRemaining = tick.remainingSeconds,
+                        pausedRemainingMs = tick.remainingMs
+                    )
+                }
+            }
+        } else {
+            // Interval reached 0 in real time
+            lastCountdownBeepSecond = null
+            HapticUtil.vibratePattern(getApplication())
+            transitionToNextInterval(isSkipped = false, overshootMs = tick.overshootMs)
+        }
     }
 
     private fun startTimerLoop() {
         timerJob?.cancel()
         timerJob = viewModelScope.launch {
             while (true) {
-                delay(1000L)
+                delay(250L)
                 val current = _activeWorkout.value
-                if (!current.isTimerRunning) break
-
-                if (current.timerSecondsRemaining > 1) {
-                    val nextSec = current.timerSecondsRemaining - 1
-                    // 3-2-1 second countdown tick
-                    if (current.isSoundEnabled && nextSec in 1..3) {
-                        SoundCueUtil.playCountdownTick()
-                    }
-                    _activeWorkout.update {
-                        it.copy(timerSecondsRemaining = nextSec)
-                    }
-                } else {
-                    // Interval reached 0
-                    HapticUtil.vibratePattern(getApplication())
-                    transitionToNextInterval(isSkipped = false)
-                }
+                if (!current.isActive || !current.isTimerRunning) break
+                syncTimerWithClock()
             }
         }
     }
 
-    private fun transitionToNextInterval(isSkipped: Boolean) {
+    private fun syncTimerNotification() {
+        val state = _activeWorkout.value
+        if (!state.isActive) {
+            WorkoutTimerService.stop(getApplication())
+            return
+        }
+
+        val phaseLabel = if (state.intervalPhase == IntervalPhase.EXERCISE) {
+            "ĆWICZENIE"
+        } else {
+            "ODPOCZYNEK"
+        }
+        val ex = state.currentExercise
+        val exerciseInfo = if (ex != null) {
+            "Seria ${state.currentSetNumber}/${ex.targetSets} • ${ex.name}"
+        } else {
+            "Sesja ${state.dayType.code}"
+        }
+
+        val remainingMs = if (state.isTimerRunning && state.intervalEndElapsedMs > 0L) {
+            (state.intervalEndElapsedMs - clock.elapsedRealtime()).coerceAtLeast(0L)
+        } else {
+            state.pausedRemainingMs.coerceAtLeast(0L)
+        }
+
+        WorkoutTimerService.startOrUpdate(
+            context = getApplication(),
+            phaseLabel = phaseLabel,
+            exerciseInfo = exerciseInfo,
+            isRunning = state.isTimerRunning,
+            remainingMs = remainingMs
+        )
+    }
+
+    private fun transitionToNextInterval(isSkipped: Boolean, overshootMs: Long = 0L) {
         val current = _activeWorkout.value
+        if (!current.isActive) return
+
+        val nextRemainingMs = if (isSkipped) {
+            WorkoutTimerMath.DEFAULT_INTERVAL_MS
+        } else {
+            WorkoutTimerMath.nextIntervalRemainingMs(overshootMs)
+        }
+        val nextRemainingSec = WorkoutTimerMath.millisToDisplaySeconds(nextRemainingMs)
+        val nowElapsed = clock.elapsedRealtime()
+        lastCountdownBeepSecond = null
+
         HapticUtil.vibrateShort(getApplication())
 
         if (current.intervalPhase == IntervalPhase.EXERCISE) {
             // Set ended -> play set ended audio cue
             if (current.isSoundEnabled) {
-                SoundCueUtil.playSetEndedCue()
+                SoundCueUtil.playSetEndedCue(current.soundVolume, current.isLoudModeEnabled)
             }
             // Switch to Rest interval (2 min = 120s)
             _activeWorkout.update {
                 it.copy(
                     intervalPhase = IntervalPhase.REST,
-                    timerSecondsRemaining = 120,
-                    timerTotalSeconds = 120,
+                    timerSecondsRemaining = nextRemainingSec,
+                    timerTotalSeconds = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+                    intervalEndElapsedMs = nowElapsed + nextRemainingMs,
+                    pausedRemainingMs = nextRemainingMs,
                     isTimerRunning = true
                 )
             }
+            startTimerLoop()
+            syncTimerNotification()
         } else {
             // Rest ended -> play rest concluded chime (time to lift!)
             if (current.isSoundEnabled) {
-                SoundCueUtil.playRestConcludedCue()
+                SoundCueUtil.playRestConcludedCue(current.soundVolume, current.isLoudModeEnabled)
             }
             // Finished rest interval -> prepare next set / exercise
-            advanceToNextSetOrExercise()
+            advanceToNextSetOrExercise(initialRemainingMs = nextRemainingMs)
         }
     }
 
-    // Log current set
+    // Log current set (updates existing entry in place if re-editing the same exercise & set)
     fun logSetAndRest() {
         val current = _activeWorkout.value
         val ex = current.currentExercise ?: return
 
-        val weight = current.inputWeight.toDoubleOrNull() ?: 0.0
-        val reps = current.inputReps.toIntOrNull() ?: ex.minReps
+        val weight = current.inputWeight.replace(',', '.').toDoubleOrNull()?.coerceAtLeast(0.0) ?: 0.0
+        val reps = current.inputReps.toIntOrNull()?.coerceAtLeast(0) ?: ex.minReps
 
         val log = SetLogEntity(
             sessionId = 0L, // set upon session save
@@ -510,21 +766,28 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
             timestamp = System.currentTimeMillis()
         )
 
-        val updatedLogs = current.recordedLogs + log
+        val updatedLogs = WorkoutSessionHelper.upsertSetLog(current.recordedLogs, log)
+        val nowElapsed = clock.elapsedRealtime()
+        lastCountdownBeepSecond = null
+
         _activeWorkout.update {
             it.copy(
                 recordedLogs = updatedLogs,
                 intervalPhase = IntervalPhase.REST,
-                timerSecondsRemaining = 120,
-                timerTotalSeconds = 120,
+                timerSecondsRemaining = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+                timerTotalSeconds = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+                intervalEndElapsedMs = nowElapsed + WorkoutTimerMath.DEFAULT_INTERVAL_MS,
+                pausedRemainingMs = WorkoutTimerMath.DEFAULT_INTERVAL_MS,
                 isTimerRunning = true
             )
         }
 
         if (current.isSoundEnabled) {
-            SoundCueUtil.playSetEndedCue()
+            SoundCueUtil.playSetEndedCue(current.soundVolume, current.isLoudModeEnabled)
         }
         HapticUtil.vibrateShort(getApplication())
+        startTimerLoop()
+        syncTimerNotification()
     }
 
     // Finish rest and proceed to the next set or exercise immediately
@@ -532,51 +795,213 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
         val current = _activeWorkout.value
         if (current.intervalPhase == IntervalPhase.REST) {
             if (current.isSoundEnabled) {
-                SoundCueUtil.playRestConcludedCue()
+                SoundCueUtil.playRestConcludedCue(current.soundVolume, current.isLoudModeEnabled)
             }
             HapticUtil.vibrateShort(getApplication())
-            advanceToNextSetOrExercise()
+            advanceToNextSetOrExercise(initialRemainingMs = WorkoutTimerMath.DEFAULT_INTERVAL_MS)
         }
     }
 
     // Advance to next set or exercise after rest
-    private fun advanceToNextSetOrExercise() {
+    private fun advanceToNextSetOrExercise(initialRemainingMs: Long = WorkoutTimerMath.DEFAULT_INTERVAL_MS) {
         val current = _activeWorkout.value
         val ex = current.currentExercise ?: return
+        val nowElapsed = clock.elapsedRealtime()
+        val remainingSec = WorkoutTimerMath.millisToDisplaySeconds(initialRemainingMs)
+        lastCountdownBeepSecond = null
 
         if (current.currentSetNumber < ex.targetSets) {
-            // Next set of current exercise
+            val nextSet = current.currentSetNumber + 1
+            val existingLog = WorkoutSessionHelper.findRecordedLog(current.recordedLogs, ex.name, nextSet)
             _activeWorkout.update {
                 it.copy(
-                    currentSetNumber = it.currentSetNumber + 1,
+                    currentSetNumber = nextSet,
                     intervalPhase = IntervalPhase.EXERCISE,
-                    timerSecondsRemaining = 120,
-                    timerTotalSeconds = 120,
-                    isTimerRunning = true
+                    timerSecondsRemaining = remainingSec,
+                    timerTotalSeconds = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+                    intervalEndElapsedMs = nowElapsed + initialRemainingMs,
+                    pausedRemainingMs = initialRemainingMs,
+                    isTimerRunning = true,
+                    inputWeight = existingLog?.let { log -> WorkoutSessionHelper.formatWeight(log.weightKg) } ?: it.inputWeight,
+                    inputReps = existingLog?.reps?.toString() ?: it.inputReps
                 )
             }
+            startTimerLoop()
+            syncTimerNotification()
         } else {
             // Finished all sets for current exercise -> go to next exercise
             val nextExerciseIndex = current.currentExerciseIndex + 1
             if (nextExerciseIndex < current.exercises.size) {
                 val nextExercise = current.exercises[nextExerciseIndex]
+                val existingLog = WorkoutSessionHelper.findRecordedLog(current.recordedLogs, nextExercise.name, 1)
                 _activeWorkout.update {
                     it.copy(
                         currentExerciseIndex = nextExerciseIndex,
                         currentSetNumber = 1,
                         intervalPhase = IntervalPhase.EXERCISE,
-                        timerSecondsRemaining = 120,
-                        timerTotalSeconds = 120,
+                        timerSecondsRemaining = remainingSec,
+                        timerTotalSeconds = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+                        intervalEndElapsedMs = nowElapsed + initialRemainingMs,
+                        pausedRemainingMs = initialRemainingMs,
                         isTimerRunning = true,
-                        inputWeight = "",
-                        inputReps = ""
+                        inputWeight = existingLog?.let { log -> WorkoutSessionHelper.formatWeight(log.weightKg) } ?: "",
+                        inputReps = existingLog?.reps?.toString() ?: ""
                     )
                 }
                 loadSuggestionForExercise(nextExercise.name)
+                startTimerLoop()
+                syncTimerNotification()
             } else {
                 // Completed entire workout!
                 finishWorkout()
             }
+        }
+    }
+
+    /**
+     * Steps back one phase/set/exercise and pauses the timer so the user can calmly
+     * enter or edit weight & reps even after the timer expired.
+     */
+    fun previousStep() {
+        val current = _activeWorkout.value
+        if (!current.isActive) return
+        val target = WorkoutSessionHelper.resolvePreviousStep(current) ?: return
+        navigateToExerciseSet(
+            targetExerciseIndex = target.exerciseIndex,
+            targetSetNumber = target.setNumber,
+            pauseTimer = true
+        )
+    }
+
+    /**
+     * Jumps directly to the previous exercise in the workout plan (paused on EXERCISE phase)
+     * so weight & reps can be updated or logged retroactively.
+     */
+    fun previousExercise() {
+        val current = _activeWorkout.value
+        if (!current.isActive) return
+        val target = WorkoutSessionHelper.resolvePreviousExercise(current) ?: return
+        navigateToExerciseSet(
+            targetExerciseIndex = target.exerciseIndex,
+            targetSetNumber = target.setNumber,
+            pauseTimer = true
+        )
+    }
+
+    /**
+     * Switches directly to a specific set number (1..targetSets) of the current exercise
+     * to review or edit weight & reps.
+     */
+    fun selectSetNumber(setNumber: Int) {
+        val current = _activeWorkout.value
+        val ex = current.currentExercise ?: return
+        val clampedSet = setNumber.coerceIn(1, ex.targetSets.coerceAtLeast(1))
+        if (clampedSet == current.currentSetNumber && current.intervalPhase == IntervalPhase.EXERCISE) return
+        navigateToExerciseSet(
+            targetExerciseIndex = current.currentExerciseIndex,
+            targetSetNumber = clampedSet,
+            pauseTimer = true
+        )
+    }
+
+    private fun navigateToExerciseSet(
+        targetExerciseIndex: Int,
+        targetSetNumber: Int,
+        pauseTimer: Boolean
+    ) {
+        val current = _activeWorkout.value
+        val targetExercise = current.exercises.getOrNull(targetExerciseIndex) ?: return
+        val clampedSet = targetSetNumber.coerceIn(1, targetExercise.targetSets.coerceAtLeast(1))
+        val isChangingExercise = targetExerciseIndex != current.currentExerciseIndex
+        val existingLog = WorkoutSessionHelper.findRecordedLog(
+            current.recordedLogs,
+            targetExercise.name,
+            clampedSet
+        )
+        val latestForExercise = current.recordedLogs.lastOrNull {
+            it.exerciseName.equals(targetExercise.name, ignoreCase = true)
+        }
+        val prefillSource = existingLog ?: if (isChangingExercise) latestForExercise else null
+
+        val prefilledWeight = when {
+            prefillSource != null -> WorkoutSessionHelper.formatWeight(prefillSource.weightKg)
+            !isChangingExercise -> current.inputWeight
+            else -> ""
+        }
+        val prefilledReps = when {
+            prefillSource != null -> prefillSource.reps.toString()
+            !isChangingExercise -> current.inputReps
+            else -> ""
+        }
+
+        val nowElapsed = clock.elapsedRealtime()
+        lastCountdownBeepSecond = null
+
+        if (pauseTimer) {
+            timerJob?.cancel()
+            _activeWorkout.update {
+                it.copy(
+                    currentExerciseIndex = targetExerciseIndex,
+                    currentSetNumber = clampedSet,
+                    intervalPhase = IntervalPhase.EXERCISE,
+                    timerSecondsRemaining = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+                    timerTotalSeconds = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+                    intervalEndElapsedMs = 0L,
+                    pausedRemainingMs = WorkoutTimerMath.DEFAULT_INTERVAL_MS,
+                    isTimerRunning = false,
+                    inputWeight = prefilledWeight,
+                    inputReps = prefilledReps
+                )
+            }
+        } else {
+            _activeWorkout.update {
+                it.copy(
+                    currentExerciseIndex = targetExerciseIndex,
+                    currentSetNumber = clampedSet,
+                    intervalPhase = IntervalPhase.EXERCISE,
+                    timerSecondsRemaining = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+                    timerTotalSeconds = WorkoutTimerMath.DEFAULT_INTERVAL_SECONDS,
+                    intervalEndElapsedMs = nowElapsed + WorkoutTimerMath.DEFAULT_INTERVAL_MS,
+                    pausedRemainingMs = WorkoutTimerMath.DEFAULT_INTERVAL_MS,
+                    isTimerRunning = true,
+                    inputWeight = prefilledWeight,
+                    inputReps = prefilledReps
+                )
+            }
+            startTimerLoop()
+        }
+
+        if (isChangingExercise) {
+            loadSuggestionForExercise(targetExercise.name)
+        }
+        syncTimerNotification()
+    }
+
+    /**
+     * Edits weight & reps of any already-recorded set in the current active session.
+     */
+    fun updateRecordedSet(index: Int, weightKg: Double, reps: Int) {
+        val current = _activeWorkout.value
+        val target = current.recordedLogs.getOrNull(index) ?: return
+        val updatedLogs = WorkoutSessionHelper.updateSetLogAt(current.recordedLogs, index, weightKg, reps)
+        val matchesCurrent = current.currentExercise?.name.equals(target.exerciseName, ignoreCase = true) &&
+            current.currentSetNumber == target.setNumber
+
+        _activeWorkout.update {
+            it.copy(
+                recordedLogs = updatedLogs,
+                inputWeight = if (matchesCurrent) WorkoutSessionHelper.formatWeight(weightKg.coerceAtLeast(0.0)) else it.inputWeight,
+                inputReps = if (matchesCurrent) reps.coerceAtLeast(0).toString() else it.inputReps
+            )
+        }
+    }
+
+    /**
+     * Removes a recorded set entry from the current active session.
+     */
+    fun deleteRecordedSet(index: Int) {
+        _activeWorkout.update {
+            it.copy(recordedLogs = WorkoutSessionHelper.removeSetLogAt(it.recordedLogs, index))
         }
     }
 
@@ -586,19 +1011,20 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
         val nextExerciseIndex = current.currentExerciseIndex + 1
         if (nextExerciseIndex < current.exercises.size) {
             val nextExercise = current.exercises[nextExerciseIndex]
-            _activeWorkout.update {
-                it.copy(
-                    currentExerciseIndex = nextExerciseIndex,
-                    currentSetNumber = 1,
-                    intervalPhase = IntervalPhase.EXERCISE,
-                    timerSecondsRemaining = 120,
-                    timerTotalSeconds = 120,
-                    isTimerRunning = true,
-                    inputWeight = "",
-                    inputReps = ""
-                )
+            val maxSets = nextExercise.targetSets.coerceAtLeast(1)
+            val recordedForNext = current.recordedLogs.filter {
+                it.exerciseName.equals(nextExercise.name, ignoreCase = true)
             }
-            loadSuggestionForExercise(nextExercise.name)
+            val nextSet = if (recordedForNext.isEmpty()) {
+                1
+            } else {
+                (recordedForNext.maxOf { it.setNumber } + 1).coerceAtMost(maxSets)
+            }
+            navigateToExerciseSet(
+                targetExerciseIndex = nextExerciseIndex,
+                targetSetNumber = nextSet,
+                pauseTimer = false
+            )
         } else {
             finishWorkout()
         }
@@ -607,6 +1033,8 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
     // Finish Workout & save to Room
     fun finishWorkout() {
         timerJob?.cancel()
+        lastCountdownBeepSecond = null
+        WorkoutTimerService.stop(getApplication())
         val current = _activeWorkout.value
         val durationSeconds = ((System.currentTimeMillis() - current.startTimestamp) / 1000).toInt().coerceAtLeast(60)
 
@@ -621,10 +1049,10 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
             _summarySession.value = details.first
             _summarySetLogs.value = details.second
 
-            _activeWorkout.value = ActiveWorkoutState()
+            _activeWorkout.value = createIdleWorkoutState()
             _currentScreen.value = AppScreen.SUMMARY
             if (current.isSoundEnabled) {
-                SoundCueUtil.playWorkoutCompleteCue()
+                SoundCueUtil.playWorkoutCompleteCue(current.soundVolume, current.isLoudModeEnabled)
             }
             HapticUtil.vibratePattern(getApplication())
         }
@@ -633,8 +1061,16 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
     // Cancel workout
     fun cancelWorkout() {
         timerJob?.cancel()
-        _activeWorkout.value = ActiveWorkoutState()
+        lastCountdownBeepSecond = null
+        WorkoutTimerService.stop(getApplication())
+        _activeWorkout.value = createIdleWorkoutState()
         _currentScreen.value = AppScreen.HOME
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        timerJob?.cancel()
+        WorkoutTimerService.stop(getApplication())
     }
 
     // Plan editing CRUD
@@ -747,5 +1183,12 @@ class WorkoutViewModel(application: Application) : AndroidViewModel(application)
             _exportImportMessage.value = summary.message
             HapticUtil.vibrateShort(getApplication())
         }
+    }
+
+    companion object {
+        private const val PREFS_SOUND = "ppl_sound_prefs"
+        private const val KEY_SOUND_ENABLED = "sound_enabled"
+        private const val KEY_SOUND_VOLUME = "sound_volume"
+        private const val KEY_LOUD_MODE = "loud_mode_enabled"
     }
 }

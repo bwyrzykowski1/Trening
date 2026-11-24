@@ -3,11 +3,12 @@ package com.example.ui.components
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,21 +19,28 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.VolumeDown
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -48,8 +56,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ui.theme.AmberAccent
 import com.example.ui.theme.RestTimerColor
 import com.example.ui.theme.WorkTimerColor
+import kotlin.math.roundToInt
 
 enum class IntervalPhase(val label: String, val description: String) {
     EXERCISE("ĆWICZENIE / SERIA", "Wykonuj ćwiczenie z pełnym skupieniem"),
@@ -63,7 +73,14 @@ fun IntervalTimerCircle(
     totalSeconds: Int,
     isRunning: Boolean,
     isSoundEnabled: Boolean = true,
+    soundVolume: Float = 1.0f,
+    isLoudModeEnabled: Boolean = false,
     onToggleSound: () -> Unit = {},
+    onSoundVolumeChange: (Float) -> Unit = {},
+    onSoundVolumeChangeFinished: () -> Unit = {},
+    onAdjustSoundVolume: (Float) -> Unit = {},
+    onToggleLoudMode: () -> Unit = {},
+    onTestSound: () -> Unit = {},
     onTogglePlayPause: () -> Unit,
     onSkipInterval: () -> Unit,
     onAdd30Seconds: () -> Unit,
@@ -85,6 +102,10 @@ fun IntervalTimerCircle(
     val minutes = secondsRemaining / 60
     val seconds = secondsRemaining % 60
     val timeFormatted = String.format("%02d:%02d", minutes, seconds)
+
+    val effectiveVolume = if (isSoundEnabled) soundVolume.coerceIn(0f, 1f) else 0f
+    val volumePercent = (effectiveVolume * 100f).roundToInt()
+    val volumeAccent = if (isLoudModeEnabled && isSoundEnabled) AmberAccent else phaseColor
 
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -122,18 +143,18 @@ fun IntervalTimerCircle(
                 IconButton(
                     onClick = onToggleSound,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(48.dp)
                         .testTag("timer_sound_toggle")
                 ) {
                     Icon(
-                        imageVector = if (isSoundEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
-                        contentDescription = if (isSoundEnabled) "Dźwięki aktywne" else "Dźwięki wyciszone",
-                        tint = if (isSoundEnabled) phaseColor else MaterialTheme.colorScheme.onSurfaceVariant
+                        imageVector = if (isSoundEnabled && effectiveVolume > 0f) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                        contentDescription = if (isSoundEnabled) "Wycisz dźwięki" else "Włącz dźwięki",
+                        tint = if (isSoundEnabled && effectiveVolume > 0f) volumeAccent else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             // Circular Timer
             Box(
@@ -255,6 +276,137 @@ fun IntervalTimerCircle(
                         contentDescription = "Pomiń interwał",
                         modifier = Modifier.size(16.dp)
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // In-App Sound Volume & Loud Mode Controls
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                border = BorderStroke(
+                    width = 1.dp,
+                    color = if (isLoudModeEnabled && isSoundEnabled) {
+                        AmberAccent.copy(alpha = 0.45f)
+                    } else {
+                        Color.White.copy(alpha = 0.08f)
+                    }
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Głośność sygnałów: $volumePercent%",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = if (volumePercent > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (isLoudModeEnabled && isSoundEnabled) {
+                                Text(
+                                    text = "Kanał alarmu • maksymalna moc",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = AmberAccent
+                                )
+                            }
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            FilterChip(
+                                selected = isLoudModeEnabled,
+                                onClick = onToggleLoudMode,
+                                label = {
+                                    Text(
+                                        text = "Głośny",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.NotificationsActive,
+                                        contentDescription = "Tryb głośny (kanał alarmu)",
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = AmberAccent.copy(alpha = 0.22f),
+                                    selectedLabelColor = AmberAccent,
+                                    selectedLeadingIconColor = AmberAccent
+                                ),
+                                modifier = Modifier.testTag("timer_loud_mode_toggle")
+                            )
+
+                            TextButton(
+                                onClick = onTestSound,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.testTag("timer_sound_test")
+                            ) {
+                                Text(
+                                    text = "Test",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = volumeAccent
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = { onAdjustSoundVolume(-0.1f) },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("timer_volume_down")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.VolumeDown,
+                                contentDescription = "Zmniejsz głośność o 10%",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Slider(
+                            value = effectiveVolume,
+                            onValueChange = onSoundVolumeChange,
+                            onValueChangeFinished = onSoundVolumeChangeFinished,
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = volumeAccent,
+                                activeTrackColor = volumeAccent,
+                                inactiveTrackColor = Color.White.copy(alpha = 0.14f)
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("timer_volume_slider")
+                        )
+
+                        IconButton(
+                            onClick = { onAdjustSoundVolume(0.1f) },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("timer_volume_up")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.VolumeUp,
+                                contentDescription = "Zwiększ głośność o 10%",
+                                tint = volumeAccent
+                            )
+                        }
+                    }
                 }
             }
         }

@@ -1,10 +1,17 @@
 package com.example
 
+import android.Manifest
+import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.AudioManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -14,9 +21,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.ActiveWorkoutMiniBar
@@ -34,6 +47,7 @@ import com.example.ui.viewmodel.WorkoutViewModel
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        volumeControlStream = AudioManager.STREAM_MUSIC
         enableEdgeToEdge()
         setContent {
             PPLWorkoutTheme {
@@ -69,6 +83,50 @@ fun WorkoutApp(viewModel: WorkoutViewModel = viewModel()) {
     val calendarSelectedDate by viewModel.calendarSelectedDate.collectAsStateWithLifecycle()
     val calendarMonth by viewModel.calendarMonth.collectAsStateWithLifecycle()
 
+    val appContext = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Keep hardware volume buttons mapped to the active cue audio stream (MUSIC vs ALARM)
+    LaunchedEffect(activeWorkoutState.isLoudModeEnabled) {
+        (appContext as? Activity)?.volumeControlStream = if (activeWorkoutState.isLoudModeEnabled) {
+            AudioManager.STREAM_ALARM
+        } else {
+            AudioManager.STREAM_MUSIC
+        }
+    }
+
+    // Immediately reconcile timer against monotonic wall-clock when returning from background/lock screen
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.syncTimerWithClock()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        viewModel.startWorkout()
+    }
+
+    val startWorkoutWithNotificationCheck: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            viewModel.startWorkout()
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         AnimatedContent(
             targetState = currentScreen,
@@ -85,7 +143,7 @@ fun WorkoutApp(viewModel: WorkoutViewModel = viewModel()) {
                         isWorkoutActive = activeWorkoutState.isActive,
                         onResumeWorkout = { viewModel.navigateTo(AppScreen.ACTIVE_WORKOUT) },
                         onSelectDay = { viewModel.selectDay(it) },
-                        onStartWorkout = { viewModel.startWorkout() },
+                        onStartWorkout = startWorkoutWithNotificationCheck,
                         onOpenEditPlan = { viewModel.navigateTo(AppScreen.EDIT_PLAN) },
                         onOpenAnalytics = { viewModel.navigateTo(AppScreen.ANALYTICS) },
                         onOpenCalendar = { viewModel.navigateTo(AppScreen.CALENDAR) },
@@ -98,6 +156,15 @@ fun WorkoutApp(viewModel: WorkoutViewModel = viewModel()) {
                         state = activeWorkoutState,
                         onMinimizeWorkout = { viewModel.navigateTo(AppScreen.HOME) },
                         onToggleSound = { viewModel.toggleSound() },
+                        onSoundVolumeChange = { viewModel.setSoundVolume(it, playPreview = false) },
+                        onSoundVolumeChangeFinished = {
+                            if (activeWorkoutState.isSoundEnabled && activeWorkoutState.soundVolume > 0f) {
+                                viewModel.testSoundCue()
+                            }
+                        },
+                        onAdjustSoundVolume = { viewModel.adjustSoundVolume(it) },
+                        onToggleLoudMode = { viewModel.toggleLoudMode() },
+                        onTestSound = { viewModel.testSoundCue() },
                         onTogglePlayPause = { viewModel.togglePlayPause() },
                         onSkipInterval = { viewModel.skipInterval() },
                         onAdd30Seconds = { viewModel.add30Seconds() },
@@ -108,6 +175,11 @@ fun WorkoutApp(viewModel: WorkoutViewModel = viewModel()) {
                         onApplySuggestion = { viewModel.applySuggestion() },
                         onLogSetAndRest = { viewModel.logSetAndRest() },
                         onFinishRestAndStartNext = { viewModel.finishRestAndStartNext() },
+                        onPreviousStep = { viewModel.previousStep() },
+                        onPreviousExercise = { viewModel.previousExercise() },
+                        onSelectSetNumber = { viewModel.selectSetNumber(it) },
+                        onUpdateRecordedSet = { idx, weight, reps -> viewModel.updateRecordedSet(idx, weight, reps) },
+                        onDeleteRecordedSet = { idx -> viewModel.deleteRecordedSet(idx) },
                         onNextExercise = { viewModel.nextExercise() },
                         onFinishWorkout = { viewModel.finishWorkout() },
                         onCancelWorkout = { viewModel.cancelWorkout() }
